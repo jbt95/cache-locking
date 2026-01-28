@@ -1,9 +1,4 @@
-import {
-  CreateTableCommand,
-  DeleteTableCommand,
-  DescribeTableCommand,
-  DynamoDBClient,
-} from '@aws-sdk/client-dynamodb';
+import { CreateTableCommand, DeleteTableCommand, DescribeTableCommand, DynamoDBClient } from '@aws-sdk/client-dynamodb';
 import { DynamoDBDocumentClient } from '@aws-sdk/lib-dynamodb';
 import type { StartedTestContainer } from 'testcontainers';
 import { createUniqueName } from './ids';

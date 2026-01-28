@@ -47,10 +47,8 @@ const containerRuntimeAvailable = await canUseContainers();
 const miniflareRuntimeAvailable = miniflareEnabled ? await canListenOnLocalhost() : false;
 
 export const describeIntegration = integrationEnabled ? describe : describe.skip;
-export const describeContainerIntegration =
-  integrationEnabled && containerRuntimeAvailable ? describe : describe.skip;
-export const describeMiniflareIntegration =
-  miniflareEnabled && miniflareRuntimeAvailable ? describe : describe.skip;
+export const describeContainerIntegration = integrationEnabled && containerRuntimeAvailable ? describe : describe.skip;
+export const describeMiniflareIntegration = miniflareEnabled && miniflareRuntimeAvailable ? describe : describe.skip;
 
 export const env = (key: string, fallback: string): string => process.env[key] ?? fallback;
 

@@ -1,6 +1,5 @@
 import { afterAll, beforeAll, it } from 'vitest';
 import type { D1Database, KVNamespace } from '@cloudflare/workers-types';
-import { createAdapter, createCacheLocking, type ResponseLike } from '@/index';
 import { startMiniflare, type MiniflareTestContext } from '../support/miniflare';
 import { describeMiniflareIntegration, makeTestPrefix } from '../integration/integration-helpers';
 import { runFullPathE2E } from './e2e-helpers';
@@ -25,40 +24,30 @@ describeMiniflareIntegration('cloudflare adapters e2e', () => {
     }
   });
 
-  it(
-    'runs the full path with KV cache + D1 leases',
-    async () => {
-      const adapter = createAdapter<ResponseLike>({
-        type: 'cloudflare-kv',
-        options: {
-          kv,
-          leasesDb: db,
-          cache: { keyPrefix: `${kvPrefix}cache:` },
-          leases: { keyPrefix: `${kvPrefix}lease:` },
-        },
-      });
+  it('runs the full path with KV cache + D1 leases', async () => {
+    const adapter = {
+      type: 'cloudflare-kv',
+      options: {
+        kv,
+        leasesDb: db,
+        cache: { keyPrefix: `${kvPrefix}cache:` },
+        leases: { keyPrefix: `${kvPrefix}lease:` },
+      },
+    } as const;
 
-      const locking = await createCacheLocking<ResponseLike>({ adapter });
-      await runFullPathE2E({ locking });
-    },
-    10000,
-  );
+    await runFullPathE2E({ adapter });
+  }, 10000);
 
-  it(
-    'runs the full path with D1 cache + D1 leases',
-    async () => {
-      const adapter = createAdapter<ResponseLike>({
-        type: 'cloudflare-d1',
-        options: {
-          db,
-          cache: { keyPrefix: `${d1Prefix}cache:` },
-          leases: { keyPrefix: `${d1Prefix}lease:` },
-        },
-      });
+  it('runs the full path with D1 cache + D1 leases', async () => {
+    const adapter = {
+      type: 'cloudflare-d1',
+      options: {
+        db,
+        cache: { keyPrefix: `${d1Prefix}cache:` },
+        leases: { keyPrefix: `${d1Prefix}lease:` },
+      },
+    } as const;
 
-      const locking = await createCacheLocking<ResponseLike>({ adapter });
-      await runFullPathE2E({ locking });
-    },
-    10000,
-  );
+    await runFullPathE2E({ adapter });
+  }, 10000);
 });

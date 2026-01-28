@@ -21,18 +21,18 @@ import { CacheOutcome } from '@core/types';
 import { resolveOptionalDuration } from '@core/defaults';
 import { callOptionsSchema, decodeKey, decodeWith, fetcherSchema, waitDelaySchema } from '@core/validation';
 import type { CacheLockingError } from '@core/errors';
-import { AbortedError } from '@core/errors';
+import { AbortedError, FetcherFailed, WaitFailed } from '@core/errors';
 import { HookRunner } from '@core/hooks';
 import { Phase } from '@core/phases';
 import { PhaseRunner } from '@core/phase-runner';
 import type { CacheLockingConfig } from '@core/services';
 import { CacheLockingConfigService, type CacheLockingEnv, CacheService, LeasesService } from '@core/services';
 
-class CallContext<V> {
+class CallContext<V, EBase = never, RBase = never, EOverride = never, ROverride = never> {
   constructor(
     public readonly key: Key,
     public readonly options: ResolvedOptions<V>,
-    public readonly hooks: HookRunner<V>,
+    public readonly hooks: HookRunner<V, EBase, RBase, EOverride, ROverride>,
   ) {}
 }
 
@@ -59,14 +59,19 @@ class WaitTimeout extends Schema.TaggedError<WaitTimeout>()('WAIT_TIMEOUT', Wait
 const isWaitRetry = (error: unknown): error is WaitRetry =>
   !!error && typeof error === 'object' && (error as { _tag?: string })._tag === 'WAIT_RETRY';
 
-export class CacheLockingRuntime<V> {
+/** Core runtime implementing the cache locking flow. */
+export class CacheLockingRuntime<V, EBase = never, RBase = never> {
   private readonly phaseRunner = new PhaseRunner();
 
-  getOrSetEffect = (
+  getOrSetEffect = <EOverride = never, ROverride = never, EFetcher = never, RFetcher = never>(
     key: string,
-    fetcher: Fetcher<V>,
-    opts?: GetOrSetOptions<V>,
-  ): Effect.Effect<GetOrSetResult<V>, CacheLockingError, CacheLockingEnv> => {
+    fetcher: Fetcher<V, EFetcher, RFetcher>,
+    opts?: GetOrSetOptions<V, EOverride, ROverride>,
+  ): Effect.Effect<
+    GetOrSetResult<V>,
+    CacheLockingError | EBase | EOverride | EFetcher,
+    CacheLockingEnv | RBase | ROverride | RFetcher
+  > => {
     const runtime = this;
 
     return Effect.gen(function* () {
@@ -108,8 +113,8 @@ export class CacheLockingRuntime<V> {
     };
   }
 
-  private configEffect(): Effect.Effect<CacheLockingConfig<V>, never, CacheLockingEnv> {
-    return CacheLockingConfigService.pipe(Effect.map((config) => config as CacheLockingConfig<V>));
+  private configEffect(): Effect.Effect<CacheLockingConfig<V, EBase, RBase>, never, CacheLockingEnv> {
+    return CacheLockingConfigService.pipe(Effect.map((config) => config as CacheLockingConfig<V, EBase, RBase>));
   }
 
   private cacheService(): Effect.Effect<Cache<V>, never, CacheLockingEnv> {
@@ -122,7 +127,7 @@ export class CacheLockingRuntime<V> {
 
   private validateGetOrSetArgsEffect(
     key: string,
-    fetcher: Fetcher<V>,
+    fetcher: Fetcher<V, unknown, unknown>,
     validateOptions: boolean,
   ): Effect.Effect<Key, CacheLockingError, CacheLockingEnv> {
     if (!validateOptions) {
@@ -138,11 +143,11 @@ export class CacheLockingRuntime<V> {
     });
   }
 
-  private parseCallOptionsEffect(
+  private parseCallOptionsEffect<EOverride = never, ROverride = never>(
     key: Key,
-    overrides: GetOrSetOptions<V> | undefined,
+    overrides: GetOrSetOptions<V, EOverride, ROverride> | undefined,
     validateOptions: boolean,
-  ): Effect.Effect<ValidatedGetOrSetOptions<V>, CacheLockingError, CacheLockingEnv> {
+  ): Effect.Effect<ValidatedGetOrSetOptions<V, EOverride, ROverride>, CacheLockingError, CacheLockingEnv> {
     if (!validateOptions) {
       return Effect.succeed({
         cacheTtl: resolveOptionalDuration(overrides?.cacheTtl, undefined),
@@ -150,7 +155,7 @@ export class CacheLockingRuntime<V> {
         waitMax: resolveOptionalDuration(overrides?.waitMax, undefined),
         waitStep: resolveOptionalDuration(overrides?.waitStep, undefined),
         shouldCache: overrides?.shouldCache,
-        ownerId: overrides?.ownerId as ValidatedGetOrSetOptions<V>['ownerId'],
+        ownerId: overrides?.ownerId as ValidatedGetOrSetOptions<V, EOverride, ROverride>['ownerId'],
         signal: overrides?.signal,
         waitStrategy: overrides?.waitStrategy,
         hooks: overrides?.hooks,
@@ -161,12 +166,12 @@ export class CacheLockingRuntime<V> {
       key,
       phase: Phase.Validation,
       adapter: 'validation',
-    }).pipe(Effect.map((value) => value as ValidatedGetOrSetOptions<V>));
+    }).pipe(Effect.map((value) => value as ValidatedGetOrSetOptions<V, EOverride, ROverride>));
   }
 
-  private resolveCallOptions(
-    defaults: ResolvedDefaults<V>,
-    parsedOverrides: ValidatedGetOrSetOptions<V>,
+  private resolveCallOptions<EOverride = never, ROverride = never>(
+    defaults: ResolvedDefaults<V, EBase, RBase>,
+    parsedOverrides: ValidatedGetOrSetOptions<V, EOverride, ROverride>,
   ): ResolvedOptions<V> {
     return {
       leaseTtl: parsedOverrides.leaseTtl ?? defaults.leaseTtl,
@@ -177,21 +182,20 @@ export class CacheLockingRuntime<V> {
       ownerId: parsedOverrides.ownerId ?? defaults.ownerId,
       signal: parsedOverrides.signal ?? defaults.signal,
       waitStrategy: parsedOverrides.waitStrategy ?? defaults.waitStrategy,
-      hooks: parsedOverrides.hooks ?? defaults.hooks,
     };
   }
 
-  private createCallContextEffect(
+  private createCallContextEffect<EOverride = never, ROverride = never>(
     key: Key,
-    overrides: GetOrSetOptions<V> | undefined,
-    config: CacheLockingConfig<V>,
-  ): Effect.Effect<CallContext<V>, CacheLockingError, CacheLockingEnv> {
+    overrides: GetOrSetOptions<V, EOverride, ROverride> | undefined,
+    config: CacheLockingConfig<V, EBase, RBase>,
+  ): Effect.Effect<CallContext<V, EBase, RBase, EOverride, ROverride>, CacheLockingError, CacheLockingEnv> {
     const runtime = this;
 
     return Effect.gen(function* () {
       const parsedOverrides = yield* runtime.parseCallOptionsEffect(key, overrides, config.validateOptions);
       const resolved = runtime.resolveCallOptions(config.defaults, parsedOverrides);
-      const hooks = new HookRunner(config.defaults.hooks, parsedOverrides.hooks);
+      const hooks = new HookRunner(runtime.phaseRunner, key, config.defaults.hooks, parsedOverrides.hooks);
       return new CallContext(key, resolved, hooks);
     });
   }
@@ -217,11 +221,11 @@ export class CacheLockingRuntime<V> {
     });
   }
 
-  private withAbortSignal<A>(
+  private withAbortSignal<A, E, R>(
     key: Key,
     signal: AbortSignal | undefined,
-    effect: Effect.Effect<A, CacheLockingError, CacheLockingEnv>,
-  ): Effect.Effect<A, CacheLockingError, CacheLockingEnv> {
+    effect: Effect.Effect<A, CacheLockingError | E, CacheLockingEnv | R>,
+  ): Effect.Effect<A, CacheLockingError | E, CacheLockingEnv | R> {
     if (!signal) {
       return effect;
     }
@@ -235,11 +239,11 @@ export class CacheLockingRuntime<V> {
     const runtime = this;
     return Effect.gen(function* () {
       const cache = yield* runtime.cacheService();
-      const value = yield* runtime.phaseRunner.runPromise(
+      const value = yield* runtime.phaseRunner.runEffect(
         Phase.CacheGet,
         { key },
         `cache.get failed for key "${key}"`,
-        () => cache.get(key),
+        cache.get(key),
       );
       return Option.fromNullable(value);
     });
@@ -253,7 +257,10 @@ export class CacheLockingRuntime<V> {
     const runtime = this;
     return Effect.gen(function* () {
       const cache = yield* runtime.cacheService();
-      return yield* runtime.phaseRunner.runPromise(Phase.CacheSet, { key }, `cache.set failed for key "${key}"`, () =>
+      return yield* runtime.phaseRunner.runEffect(
+        Phase.CacheSet,
+        { key },
+        `cache.set failed for key "${key}"`,
         cache.set(key, value, ttl),
       );
     });
@@ -267,11 +274,11 @@ export class CacheLockingRuntime<V> {
     const runtime = this;
     return Effect.gen(function* () {
       const leases = yield* runtime.leasesService();
-      return yield* runtime.phaseRunner.runPromise(
+      return yield* runtime.phaseRunner.runEffect(
         Phase.LeaseAcquire,
         { key },
         `leases.acquire failed for key "${key}"`,
-        () => leases.acquire(key, owner, ttl),
+        leases.acquire(key, owner, ttl),
       );
     });
   }
@@ -280,11 +287,11 @@ export class CacheLockingRuntime<V> {
     const runtime = this;
     return Effect.gen(function* () {
       const leases = yield* runtime.leasesService();
-      return yield* runtime.phaseRunner.runPromise(
+      return yield* runtime.phaseRunner.runEffect(
         Phase.LeaseRelease,
         { key },
         `leases.release failed for key "${key}"`,
-        () => leases.release(key, owner),
+        leases.release(key, owner),
       );
     });
   }
@@ -297,11 +304,11 @@ export class CacheLockingRuntime<V> {
       if (!markReady) {
         return undefined;
       }
-      return yield* runtime.phaseRunner.runPromise(
+      return yield* runtime.phaseRunner.runEffect(
         Phase.LeaseMarkReady,
         { key },
         `leases.markReady failed for key "${key}"`,
-        () => markReady(key),
+        markReady(key),
       );
     });
   }
@@ -314,81 +321,74 @@ export class CacheLockingRuntime<V> {
       if (!isReady) {
         return Option.none<LeaseReadyState>();
       }
-      const state = yield* runtime.phaseRunner.runPromise(
+      const state = yield* runtime.phaseRunner.runEffect(
         Phase.LeaseIsReady,
         { key },
         `leases.isReady failed for key "${key}"`,
-        () => isReady(key),
+        isReady(key),
       );
       return Option.fromNullable(state);
     });
   }
 
-  private fetchValue(
+  private fetchValue<EFetcher, RFetcher>(
     key: Key,
-    fetcher: Fetcher<V>,
+    fetcher: Fetcher<V, EFetcher, RFetcher>,
     context: FetcherContext,
-  ): Effect.Effect<V, CacheLockingError, CacheLockingEnv> {
-    return this.phaseRunner.runPromise(Phase.Fetcher, { key }, `fetcher failed for key "${key}"`, () =>
-      fetcher(context),
+  ): Effect.Effect<V, CacheLockingError | EFetcher, CacheLockingEnv | RFetcher> {
+    const message = `fetcher failed for key "${key}"`;
+    const errorContext = { key, phase: Phase.Fetcher, adapter: 'fetcher' } as const;
+
+    return Effect.try({
+      try: () => fetcher(context),
+      catch: (cause) => new FetcherFailed(message, errorContext, cause),
+    }).pipe(
+      Effect.flatMap((result) => {
+        if (!Effect.isEffect(result)) {
+          return Effect.fail(new FetcherFailed(`${message}; fetcher must return an Effect`, errorContext, result));
+        }
+        return this.phaseRunner.runEffect(Phase.Fetcher, { key }, message, result);
+      }),
     );
   }
 
-  private hookOnHit(call: CallContext<V>, value: V): Effect.Effect<void, CacheLockingError, CacheLockingEnv> {
-    return this.phaseRunner.runPromise(
-      Phase.HooksOnHit,
-      { key: call.key },
-      `hooks.onHit failed for key "${call.key}"`,
-      () => call.hooks.onHit(value, { key: call.key }),
-    );
+  private hookOnHit<EOverride, ROverride>(
+    call: CallContext<V, EBase, RBase, EOverride, ROverride>,
+    value: V,
+  ): Effect.Effect<void, CacheLockingError | EBase | EOverride, RBase | ROverride> {
+    return call.hooks.onHit(value, { key: call.key });
   }
 
-  private hookOnLeader(
-    call: CallContext<V>,
+  private hookOnLeader<EOverride, ROverride>(
+    call: CallContext<V, EBase, RBase, EOverride, ROverride>,
     value: V,
     leaseUntil: number,
     cached: boolean,
-  ): Effect.Effect<void, CacheLockingError, CacheLockingEnv> {
-    return this.phaseRunner.runPromise(
-      Phase.HooksOnLeader,
-      { key: call.key },
-      `hooks.onLeader failed for key "${call.key}"`,
-      () => call.hooks.onLeader(value, { key: call.key, leaseUntil, cached }),
-    );
+  ): Effect.Effect<void, CacheLockingError | EBase | EOverride, RBase | ROverride> {
+    return call.hooks.onLeader(value, { key: call.key, leaseUntil, cached });
   }
 
-  private hookOnFollowerWait(
-    call: CallContext<V>,
+  private hookOnFollowerWait<EOverride, ROverride>(
+    call: CallContext<V, EBase, RBase, EOverride, ROverride>,
     leaseUntil: number,
     waited: Duration.Duration,
     outcome: 'HIT' | 'FALLBACK',
-  ): Effect.Effect<void, CacheLockingError, CacheLockingEnv> {
-    return this.phaseRunner.runPromise(
-      Phase.HooksOnFollowerWait,
-      { key: call.key },
-      `hooks.onFollowerWait failed for key "${call.key}"`,
-      () =>
-        call.hooks.onFollowerWait({
-          key: call.key,
-          leaseUntil,
-          waited,
-          outcome,
-        }),
-    );
+  ): Effect.Effect<void, CacheLockingError | EBase | EOverride, RBase | ROverride> {
+    return call.hooks.onFollowerWait({
+      key: call.key,
+      leaseUntil,
+      waited,
+      outcome,
+    });
   }
 
-  private hookOnFallback(
-    call: CallContext<V>,
+  private hookOnFallback<EOverride, ROverride>(
+    call: CallContext<V, EBase, RBase, EOverride, ROverride>,
     value: V,
     leaseUntil: number,
     waited: Duration.Duration,
-  ): Effect.Effect<void, CacheLockingError, CacheLockingEnv> {
-    return this.phaseRunner.runPromise(
-      Phase.HooksOnFallback,
-      { key: call.key },
-      `hooks.onFallback failed for key "${call.key}"`,
-      () => call.hooks.onFallback(value, { key: call.key, leaseUntil, waited }),
-    );
+  ): Effect.Effect<void, CacheLockingError | EBase | EOverride, RBase | ROverride> {
+    return call.hooks.onFallback(value, { key: call.key, leaseUntil, waited });
   }
 
   private resolveWaitDelay(
@@ -406,7 +406,9 @@ export class CacheLockingRuntime<V> {
       );
   }
 
-  private waitForCache(call: CallContext<V>): Effect.Effect<WaitOutcome<V>, CacheLockingError, CacheLockingEnv> {
+  private waitForCache<EOverride, ROverride>(
+    call: CallContext<V, EBase, RBase, EOverride, ROverride>,
+  ): Effect.Effect<WaitOutcome<V>, CacheLockingError, CacheLockingEnv> {
     const runtime = this;
 
     return Effect.gen(function* () {
@@ -452,7 +454,15 @@ export class CacheLockingRuntime<V> {
 
       const waitResult = yield* poll.pipe(
         Effect.retry(retrySchedule),
-        Effect.catchTag('WAIT_RETRY', () => Effect.dieMessage('wait retry escaped retry schedule')),
+        Effect.catchTag('WAIT_RETRY', (error) =>
+          Effect.fail(
+            new WaitFailed(
+              'wait retry escaped retry schedule',
+              { key: call.key, phase: Phase.WaitSleep, adapter: 'wait' },
+              error,
+            ),
+          ),
+        ),
         Effect.timeoutFail({ duration: call.options.waitMax, onTimeout: () => new WaitTimeout(call.key) }),
         Effect.catchTag('WAIT_TIMEOUT', () => Effect.succeed(Option.none<V>())),
       );
@@ -477,11 +487,15 @@ export class CacheLockingRuntime<V> {
     });
   }
 
-  private runLeader(
-    call: CallContext<V>,
+  private runLeader<EOverride, ROverride, EFetcher, RFetcher>(
+    call: CallContext<V, EBase, RBase, EOverride, ROverride>,
     lease: LeaseAcquireResult,
-    fetcher: Fetcher<V>,
-  ): Effect.Effect<GetOrSetResult<V>, CacheLockingError, CacheLockingEnv> {
+    fetcher: Fetcher<V, EFetcher, RFetcher>,
+  ): Effect.Effect<
+    GetOrSetResult<V>,
+    CacheLockingError | EBase | EOverride | EFetcher,
+    CacheLockingEnv | RBase | ROverride | RFetcher
+  > {
     const runtime = this;
 
     return Effect.gen(function* () {
@@ -507,11 +521,15 @@ export class CacheLockingRuntime<V> {
     });
   }
 
-  private runFollower(
-    call: CallContext<V>,
+  private runFollower<EOverride, ROverride, EFetcher, RFetcher>(
+    call: CallContext<V, EBase, RBase, EOverride, ROverride>,
     lease: LeaseAcquireResult,
-    fetcher: Fetcher<V>,
-  ): Effect.Effect<GetOrSetResult<V>, CacheLockingError, CacheLockingEnv> {
+    fetcher: Fetcher<V, EFetcher, RFetcher>,
+  ): Effect.Effect<
+    GetOrSetResult<V>,
+    CacheLockingError | EBase | EOverride | EFetcher,
+    CacheLockingEnv | RBase | ROverride | RFetcher
+  > {
     const runtime = this;
 
     return Effect.gen(function* () {
@@ -535,30 +553,20 @@ export class CacheLockingRuntime<V> {
     });
   }
 
-  private runLeaderWithRelease(
-    call: CallContext<V>,
+  private runLeaderWithRelease<EOverride, ROverride, EFetcher, RFetcher>(
+    call: CallContext<V, EBase, RBase, EOverride, ROverride>,
     lease: LeaseAcquireResult,
-    fetcher: Fetcher<V>,
-  ): Effect.Effect<GetOrSetResult<V>, CacheLockingError, CacheLockingEnv> {
+    fetcher: Fetcher<V, EFetcher, RFetcher>,
+  ): Effect.Effect<
+    GetOrSetResult<V>,
+    CacheLockingError | EBase | EOverride | EFetcher,
+    CacheLockingEnv | RBase | ROverride | RFetcher
+  > {
     const runtime = this;
 
     return Effect.scoped(
       Effect.acquireRelease(Effect.succeed(lease), () =>
-        runtime.leaseRelease(call.key, call.options.ownerId).pipe(
-          Effect.catchTags({
-            VALIDATION_ERROR: () => Effect.succeed(undefined),
-            CACHE_GET_FAILED: () => Effect.succeed(undefined),
-            CACHE_SET_FAILED: () => Effect.succeed(undefined),
-            LEASE_ACQUIRE_FAILED: () => Effect.succeed(undefined),
-            LEASE_RELEASE_FAILED: () => Effect.succeed(undefined),
-            LEASE_READY_FAILED: () => Effect.succeed(undefined),
-            FETCHER_FAILED: () => Effect.succeed(undefined),
-            HOOK_FAILED: () => Effect.succeed(undefined),
-            WAIT_STRATEGY_FAILED: () => Effect.succeed(undefined),
-            WAIT_FAILED: () => Effect.succeed(undefined),
-            ABORTED: () => Effect.succeed(undefined),
-          }),
-        ),
+        runtime.leaseRelease(call.key, call.options.ownerId).pipe(Effect.ignore),
       ).pipe(Effect.flatMap(() => runtime.runLeader(call, lease, fetcher))),
     );
   }

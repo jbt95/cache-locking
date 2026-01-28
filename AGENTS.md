@@ -5,6 +5,11 @@ Lease-based single-flight cache locking library.
 ## Quick Reference
 
 - Package manager: pnpm
+- Required checks after code changes: `pnpm lint`, `pnpm typecheck`, `pnpm test`
+
+## Documentation Rules
+
+- Add JSDoc for all exported code you create or modify (functions, classes, types, constants).
 
 ## Detailed Instructions
 

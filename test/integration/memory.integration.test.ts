@@ -1,22 +1,38 @@
+import { Effect } from 'effect';
 import { expect, it } from 'vitest';
-import { CacheOutcome, createCacheLocking } from '@/index';
+import { Cache, CacheOutcome } from '@/index';
 import { describeIntegration } from './integration-helpers';
 
 describeIntegration('memory adapter integration', () => {
   it('uses memory adapter for cache + leases', async () => {
-    const locking = await createCacheLocking<string>({
-      adapter: { type: 'memory' },
-      leaseTtl: 50,
-      waitMax: 100,
-      waitStep: 10,
-    });
+    const adapter = { type: 'memory' } as const;
 
-    const result = await locking.getOrSet('memory-key', async () => 'value', { cacheTtl: 500 });
+    const first = await Effect.runPromise(
+      Cache.getOrSet({
+        adapter,
+        key: 'memory-key',
+        leaseTtl: 50,
+        waitMax: 100,
+        waitStep: 10,
+        cacheTtl: 500,
+        fetcher: () => Effect.succeed('value'),
+      }),
+    );
 
-    expect(result.meta.cache).toBe(CacheOutcome.MISS_LEADER);
-    expect(await locking.cache.get('memory-key')).toBe('value');
+    const second = await Effect.runPromise(
+      Cache.getOrSet({
+        adapter,
+        key: 'memory-key',
+        leaseTtl: 50,
+        waitMax: 100,
+        waitStep: 10,
+        cacheTtl: 500,
+        fetcher: () => Effect.succeed('should-not-run'),
+      }),
+    );
 
-    const lease = await locking.leases.acquire('memory-key', 'owner', 50);
-    expect(lease.role).toBe('leader');
+    expect(first.meta.cache).toBe(CacheOutcome.MISS_LEADER);
+    expect(second.meta.cache).toBe(CacheOutcome.HIT);
+    expect(second.value).toBe('value');
   });
 });

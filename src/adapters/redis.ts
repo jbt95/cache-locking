@@ -1,7 +1,10 @@
-import { Duration } from 'effect';
+import { Duration, Effect } from 'effect';
+import { AdapterError } from '@core/errors';
 import type { Cache, CoreClock, LeaseAcquireResult, LeaseReadyState, Leases } from '@core/types';
+import { toMillisClamped } from '@adapters/utils';
 import type { RedisClientType } from 'redis';
 
+/** Options for Redis cache adapter. */
 export type RedisCacheOptions<V> = {
   client: Pick<RedisClientType, 'get' | 'set'>;
   keyPrefix?: string;
@@ -9,6 +12,7 @@ export type RedisCacheOptions<V> = {
   deserialize?: (value: string) => V;
 };
 
+/** Options for Redis leases adapter. */
 export type RedisLeasesOptions = {
   client: Pick<RedisClientType, 'set' | 'get' | 'pTTL' | 'eval'>;
   keyPrefix?: string;
@@ -17,11 +21,13 @@ export type RedisLeasesOptions = {
   clock?: CoreClock;
 };
 
+/** Lua script for safe lease release. */
 export const REDIS_RELEASE_SCRIPT =
   "if redis.call('GET', KEYS[1]) == ARGV[1] then return redis.call('DEL', KEYS[1]) else return 0 end";
 
 const DEFAULT_READY_TTL = Duration.seconds(5);
 
+/** Redis cache adapter using string serialization. */
 export class RedisCache<V> implements Cache<V> {
   private readonly client: Pick<RedisClientType, 'get' | 'set'>;
   private readonly keyPrefix: string;
@@ -39,25 +45,36 @@ export class RedisCache<V> implements Cache<V> {
     return `${this.keyPrefix}${key}`;
   }
 
-  async get(key: string): Promise<V | null> {
-    const value = await this.client.get(this.cacheKey(key));
-    if (value === null) {
-      return null;
-    }
-    return this.deserialize(value);
+  get(key: string): Effect.Effect<V | null, AdapterError> {
+    return Effect.tryPromise({
+      try: async () => {
+        const value = await this.client.get(this.cacheKey(key));
+        if (value === null) {
+          return null;
+        }
+        return this.deserialize(value);
+      },
+      catch: (cause) => new AdapterError('cache.get', key, cause),
+    });
   }
 
-  async set(key: string, value: V, ttl?: Duration.DurationInput): Promise<void> {
-    const serialized = this.serialize(value);
-    if (ttl === undefined) {
-      await this.client.set(this.cacheKey(key), serialized);
-      return;
-    }
-    const ttlMs = Duration.toMillis(ttl);
-    await this.client.set(this.cacheKey(key), serialized, { PX: Math.max(0, ttlMs) });
+  set(key: string, value: V, ttl?: Duration.DurationInput): Effect.Effect<void, AdapterError> {
+    return Effect.tryPromise({
+      try: async () => {
+        const serialized = this.serialize(value);
+        if (ttl === undefined) {
+          await this.client.set(this.cacheKey(key), serialized);
+          return;
+        }
+        const ttlMs = toMillisClamped(ttl);
+        await this.client.set(this.cacheKey(key), serialized, { PX: ttlMs });
+      },
+      catch: (cause) => new AdapterError('cache.set', key, cause),
+    });
   }
 }
 
+/** Redis leases adapter using compare-and-delete release. */
 export class RedisLeases implements Leases {
   private readonly client: Pick<RedisClientType, 'set' | 'get' | 'pTTL' | 'eval'>;
   private readonly clock: CoreClock;
@@ -81,36 +98,58 @@ export class RedisLeases implements Leases {
     return `${this.readyKeyPrefix}${key}`;
   }
 
-  async acquire(key: string, owner: string, ttl: Duration.DurationInput): Promise<LeaseAcquireResult> {
-    const ttlMs = Duration.toMillis(ttl);
-    const ok = await this.client.set(this.leaseKey(key), owner, { PX: Math.max(0, ttlMs), NX: true });
-    if (ok === 'OK') {
-      return { role: 'leader', leaseUntil: this.clock.now() + Math.max(0, ttlMs) };
-    }
+  acquire(key: string, owner: string, ttl: Duration.DurationInput): Effect.Effect<LeaseAcquireResult, AdapterError> {
+    return Effect.tryPromise({
+      try: async () => {
+        const ttlMs = toMillisClamped(ttl);
+        const ok = await this.client.set(this.leaseKey(key), owner, { PX: ttlMs, NX: true });
+        if (ok === 'OK') {
+          return { role: 'leader', leaseUntil: this.clock.now() + ttlMs };
+        }
 
-    const ttlLeft = await this.client.pTTL(this.leaseKey(key));
-    const leaseUntil = ttlLeft > 0 ? this.clock.now() + ttlLeft : this.clock.now();
-    return { role: 'follower', leaseUntil };
+        const ttlLeft = await this.client.pTTL(this.leaseKey(key));
+        const leaseUntil = ttlLeft > 0 ? this.clock.now() + ttlLeft : this.clock.now();
+        return { role: 'follower', leaseUntil };
+      },
+      catch: (cause) => new AdapterError('leases.acquire', key, cause),
+    });
   }
 
-  async release(key: string, owner: string): Promise<void> {
-    await this.client.eval(REDIS_RELEASE_SCRIPT, { keys: [this.leaseKey(key)], arguments: [owner] });
+  release(key: string, owner: string): Effect.Effect<void, AdapterError> {
+    return Effect.tryPromise({
+      try: async () => {
+        await this.client.eval(REDIS_RELEASE_SCRIPT, { keys: [this.leaseKey(key)], arguments: [owner] });
+      },
+      catch: (cause) => new AdapterError('leases.release', key, cause),
+    });
   }
 
-  async markReady(key: string): Promise<void> {
-    const ttlMs = Duration.toMillis(this.readyTtl);
-    await this.client.set(this.readyKey(key), '1', { PX: Math.max(0, ttlMs) });
+  markReady(key: string): Effect.Effect<void, AdapterError> {
+    return Effect.tryPromise({
+      try: async () => {
+        const ttlMs = toMillisClamped(this.readyTtl);
+        await this.client.set(this.readyKey(key), '1', { PX: ttlMs });
+      },
+      catch: (cause) => new AdapterError('leases.markReady', key, cause),
+    });
   }
 
-  async isReady(key: string): Promise<LeaseReadyState> {
-    const ready = await this.client.get(this.readyKey(key));
-    if (ready) {
-      return { ready: true, expired: false };
-    }
-    const ttlLeft = await this.client.pTTL(this.leaseKey(key));
-    return { ready: false, expired: ttlLeft <= 0 };
+  isReady(key: string): Effect.Effect<LeaseReadyState, AdapterError> {
+    return Effect.tryPromise({
+      try: async () => {
+        const ready = await this.client.get(this.readyKey(key));
+        if (ready) {
+          return { ready: true, expired: false };
+        }
+        const ttlLeft = await this.client.pTTL(this.leaseKey(key));
+        return { ready: false, expired: ttlLeft <= 0 };
+      },
+      catch: (cause) => new AdapterError('leases.isReady', key, cause),
+    });
   }
 }
 
+/** Create a Redis cache adapter instance. */
 export const createRedisCache = <V>(options: RedisCacheOptions<V>): Cache<V> => new RedisCache(options);
+/** Create a Redis leases adapter instance. */
 export const createRedisLeases = (options: RedisLeasesOptions): Leases => new RedisLeases(options);

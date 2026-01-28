@@ -1,6 +1,7 @@
 import { Duration } from 'effect';
 import type { WaitStrategy } from '@core/types';
 
+/** Options for exponential backoff wait strategy. */
 export type BackoffWaitStrategyOptions = {
   initial?: Duration.DurationInput;
   max?: Duration.DurationInput;
@@ -8,8 +9,10 @@ export type BackoffWaitStrategyOptions = {
   jitter?: number;
 };
 
+/** Fixed wait strategy that returns waitStep. */
 export const fixedWaitStrategy: WaitStrategy = ({ waitStep }) => waitStep;
 
+/** Create an exponential backoff wait strategy with jitter. */
 export const createBackoffWaitStrategy = (options: BackoffWaitStrategyOptions = {}): WaitStrategy => {
   const multiplier = options.multiplier ?? 2;
   const jitter = options.jitter ?? 0.2;

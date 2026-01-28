@@ -86,7 +86,9 @@ const adapterInstanceSchema = Schema.Struct({
   leases: Schema.optional(leasesSchema),
 });
 
-const adapterSchema = Schema.Union(adapterConfigSchema, adapterInstanceSchema);
+const adapterAliasSchema = Schema.Literal('memory');
+
+const adapterSchema = Schema.Union(adapterAliasSchema, adapterConfigSchema, adapterInstanceSchema);
 
 const abortSignalSchema = Schema.Unknown.pipe(
   Schema.filter(
@@ -98,9 +100,12 @@ const abortSignalSchema = Schema.Unknown.pipe(
 
 const hooksSchema = objectWithFunctionsSchema('hooks', [], ['onHit', 'onLeader', 'onFollowerWait', 'onFallback']);
 
+/** Schema for cache key values. */
 export const keySchema = nonEmptyStringSchema('key').pipe(Schema.brand('Key'));
+/** Schema for owner id values. */
 export const ownerIdSchema = nonEmptyStringSchema('ownerId').pipe(Schema.brand('OwnerId'));
 
+/** Schema for base cache locking options. */
 export const baseOptionsSchema = Schema.Struct({
   adapter: adapterSchema,
   leases: Schema.optional(leasesSchema),
@@ -118,6 +123,7 @@ export const baseOptionsSchema = Schema.Struct({
   validateOptions: Schema.optional(Schema.Boolean),
 });
 
+/** Schema for getOrSet call options. */
 export const callOptionsSchema = Schema.Struct({
   cacheTtl: Schema.optional(durationSchema('cacheTtl')),
   leaseTtl: Schema.optional(durationSchema('leaseTtl')),
@@ -129,14 +135,18 @@ export const callOptionsSchema = Schema.Struct({
   waitStrategy: Schema.optional(functionSchema('waitStrategy')),
   hooks: Schema.optional(hooksSchema),
 });
+/** Schema for fetcher functions. */
 export const fetcherSchema = functionSchema('fetcher');
+/** Schema for waitStrategy delay values. */
 export const waitDelaySchema = durationSchema('waitStrategy return');
 
+/** Format parse errors as simple strings. */
 export const formatParseIssues = (error: ParseResult.ParseError): ReadonlyArray<string> =>
   ParseResult.ArrayFormatter.formatErrorSync(error).map(
     (issue) => `${issue.path.length > 0 ? issue.path.map(String).join('.') : 'value'}: ${issue.message}`,
   );
 
+/** Decode an unknown value with a schema and map to ValidationError. */
 export const decodeWith = <T, I>(
   schema: Schema.Schema<T, I, never>,
   value: unknown,
@@ -153,19 +163,26 @@ export const decodeWith = <T, I>(
   );
 };
 
+/** Decode and validate a key value. */
 export const decodeKey = (value: unknown, context: CacheLockingErrorContext): Effect.Effect<Key, ValidationError> =>
   decodeWith(keySchema, value, 'key', context);
 
+/** Decode and validate an owner id value. */
 export const decodeOwnerId = (
   value: unknown,
   context: CacheLockingErrorContext,
 ): Effect.Effect<OwnerId, ValidationError> => decodeWith(ownerIdSchema, value, 'ownerId', context);
 
+/** Decode and validate a cache adapter. */
 export const decodeCache = (
   value: unknown,
   context: CacheLockingErrorContext,
 ): Effect.Effect<Cache<unknown>, ValidationError> =>
   decodeWith(cacheSchema, value, 'cache', context).pipe(Effect.map((cache) => cache as Cache<unknown>));
 
-export const decodeLeases = (value: unknown, context: CacheLockingErrorContext): Effect.Effect<Leases, ValidationError> =>
+/** Decode and validate a leases adapter. */
+export const decodeLeases = (
+  value: unknown,
+  context: CacheLockingErrorContext,
+): Effect.Effect<Leases, ValidationError> =>
   decodeWith(leasesSchema, value, 'leases', context).pipe(Effect.map((leases) => leases as Leases));

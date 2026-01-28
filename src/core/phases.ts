@@ -1,3 +1,4 @@
+/** Cache locking phase identifiers for tracing and errors. */
 export const Phase = {
   Validation: 'validation',
   CacheGet: 'cache.get',
@@ -16,4 +17,5 @@ export const Phase = {
   Abort: 'abort',
 } as const;
 
+/** Union of phase identifiers. */
 export type Phase = (typeof Phase)[keyof typeof Phase];

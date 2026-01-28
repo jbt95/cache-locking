@@ -13,59 +13,77 @@ import { DynamoDbCache, type DynamoDbCacheOptions } from '@adapters/dynamodb';
 import { MemcachedCache, type MemcachedCacheOptions } from '@adapters/memcached';
 import { MemoryCache, type MemoryCacheOptions, MemoryLeases, type MemoryLeasesOptions } from '@adapters/memory';
 import { MongoCache, MongoLeases, type MongoCacheOptions, type MongoLeasesOptions } from '@adapters/mongodb';
-import { PostgresCache, PostgresLeases, type PostgresCacheOptions, type PostgresLeasesOptions } from '@adapters/postgres';
+import {
+  PostgresCache,
+  PostgresLeases,
+  type PostgresCacheOptions,
+  type PostgresLeasesOptions,
+} from '@adapters/postgres';
 import { R2Cache, R2Leases, type R2CacheOptions, type R2LeasesOptions } from '@adapters/r2';
 import { RedisCache, type RedisCacheOptions, RedisLeases, type RedisLeasesOptions } from '@adapters/redis';
 import { S3Cache, S3Leases, type S3CacheOptions, type S3LeasesOptions } from '@adapters/s3';
 
+/** Adapter bundle with cache and optional leases. */
 export type ProviderAdapter<V> = {
   cache: Cache<V>;
   leases?: Leases;
 };
 
+/** Options for memory adapter bundle. */
 export type MemoryAdapterOptions = {
   cache?: MemoryCacheOptions;
   leases?: MemoryLeasesOptions;
 };
 
+/** Redis client subset required by adapters. */
 export type RedisAdapterClient = Pick<RedisClientType, 'get' | 'set' | 'pTTL' | 'eval'>;
 
+/** Options for Redis adapter bundle. */
 export type RedisAdapterOptions<V> = {
   client: RedisAdapterClient;
   cache?: Omit<RedisCacheOptions<V>, 'client'>;
   leases?: Omit<RedisLeasesOptions, 'client'>;
 };
 
+/** Options for Memcached adapter bundle. */
 export type MemcachedAdapterOptions<V> = MemcachedCacheOptions<V>;
+/** Options for DynamoDB adapter bundle. */
 export type DynamoDbAdapterOptions<V> = DynamoDbCacheOptions<V>;
+/** Options for MongoDB adapter bundle. */
 export type MongoAdapterOptions<V> = {
   cache: MongoCacheOptions<V>;
   leases: MongoLeasesOptions;
 };
+/** Options for Postgres adapter bundle. */
 export type PostgresAdapterOptions<V> = {
   cache: PostgresCacheOptions<V>;
   leases: PostgresLeasesOptions;
 };
+/** Options for S3 adapter bundle. */
 export type S3AdapterOptions<V> = {
   cache: S3CacheOptions<V>;
   leases: S3LeasesOptions;
 };
+/** Options for R2 adapter bundle. */
 export type R2AdapterOptions<V> = {
   cache: R2CacheOptions<V>;
   leases: R2LeasesOptions;
 };
+/** Options for Cloudflare KV adapter bundle. */
 export type CloudflareKvAdapterOptions<V> = {
   kv: KVNamespace;
   leasesDb: D1Database;
   cache?: Omit<CloudflareKvCacheOptions<V>, 'kv'>;
   leases?: Omit<CloudflareD1LeasesOptions, 'db'>;
 };
+/** Options for Cloudflare D1 adapter bundle. */
 export type CloudflareD1AdapterOptions<V> = {
   db: D1Database;
   cache?: Omit<CloudflareD1CacheOptions<V>, 'db'>;
   leases?: Omit<CloudflareD1LeasesOptions, 'db'>;
 };
 
+/** Memory cache+leases adapter. */
 export class MemoryAdapter<V> implements ProviderAdapter<V> {
   cache: MemoryCache<V>;
   leases: MemoryLeases;
@@ -76,6 +94,7 @@ export class MemoryAdapter<V> implements ProviderAdapter<V> {
   }
 }
 
+/** Redis cache+leases adapter. */
 export class RedisAdapter<V> implements ProviderAdapter<V> {
   cache: RedisCache<V>;
   leases: RedisLeases;
@@ -86,6 +105,7 @@ export class RedisAdapter<V> implements ProviderAdapter<V> {
   }
 }
 
+/** Memcached cache adapter (no leases). */
 export class MemcachedAdapter<V> implements ProviderAdapter<V> {
   cache: MemcachedCache<V>;
 
@@ -94,6 +114,7 @@ export class MemcachedAdapter<V> implements ProviderAdapter<V> {
   }
 }
 
+/** DynamoDB cache adapter (no leases). */
 export class DynamoDbAdapter<V> implements ProviderAdapter<V> {
   cache: DynamoDbCache<V>;
 
@@ -102,6 +123,7 @@ export class DynamoDbAdapter<V> implements ProviderAdapter<V> {
   }
 }
 
+/** MongoDB cache+leases adapter. */
 export class MongoAdapter<V> implements ProviderAdapter<V> {
   cache: MongoCache<V>;
   leases: MongoLeases;
@@ -112,6 +134,7 @@ export class MongoAdapter<V> implements ProviderAdapter<V> {
   }
 }
 
+/** Postgres cache+leases adapter. */
 export class PostgresAdapter<V> implements ProviderAdapter<V> {
   cache: PostgresCache<V>;
   leases: PostgresLeases;
@@ -122,6 +145,7 @@ export class PostgresAdapter<V> implements ProviderAdapter<V> {
   }
 }
 
+/** S3 cache+leases adapter. */
 export class S3Adapter<V> implements ProviderAdapter<V> {
   cache: S3Cache<V>;
   leases: S3Leases;
@@ -132,6 +156,7 @@ export class S3Adapter<V> implements ProviderAdapter<V> {
   }
 }
 
+/** R2 cache+leases adapter. */
 export class R2Adapter<V> implements ProviderAdapter<V> {
   cache: R2Cache<V>;
   leases: R2Leases;
@@ -142,6 +167,7 @@ export class R2Adapter<V> implements ProviderAdapter<V> {
   }
 }
 
+/** Cloudflare KV cache with D1 leases adapter. */
 export class CloudflareKvAdapter<V> implements ProviderAdapter<V> {
   cache: CloudflareKvCache<V>;
   leases: CloudflareD1Leases;
@@ -152,6 +178,7 @@ export class CloudflareKvAdapter<V> implements ProviderAdapter<V> {
   }
 }
 
+/** Cloudflare D1 cache+leases adapter. */
 export class CloudflareD1Adapter<V> implements ProviderAdapter<V> {
   cache: CloudflareD1Cache<V>;
   leases: CloudflareD1Leases;
@@ -162,6 +189,7 @@ export class CloudflareD1Adapter<V> implements ProviderAdapter<V> {
   }
 }
 
+/** Supported adapter types. */
 export type AdapterType =
   | 'memory'
   | 'redis'
@@ -174,6 +202,7 @@ export type AdapterType =
   | 's3'
   | 'r2';
 
+/** Adapter configuration union by type. */
 export type AdapterConfig<V> =
   | { type: 'memory'; options?: MemoryAdapterOptions }
   | { type: 'redis'; options: RedisAdapterOptions<V> }
@@ -186,6 +215,7 @@ export type AdapterConfig<V> =
   | { type: 's3'; options: S3AdapterOptions<V> }
   | { type: 'r2'; options: R2AdapterOptions<V> };
 
+/** Create an adapter bundle from a config object. */
 export const createAdapter = <V>(config: AdapterConfig<V>): ProviderAdapter<V> => {
   switch (config.type) {
     case 'memory':
@@ -215,19 +245,29 @@ export const createAdapter = <V>(config: AdapterConfig<V>): ProviderAdapter<V> =
   }
 };
 
+/** Create a memory adapter bundle. */
 export const createMemoryAdapter = <V>(options?: MemoryAdapterOptions): MemoryAdapter<V> =>
   new MemoryAdapter<V>(options);
+/** Create a Redis adapter bundle. */
 export const createRedisAdapter = <V>(options: RedisAdapterOptions<V>): RedisAdapter<V> => new RedisAdapter<V>(options);
+/** Create a Memcached adapter bundle. */
 export const createMemcachedAdapter = <V>(options: MemcachedAdapterOptions<V>): MemcachedAdapter<V> =>
   new MemcachedAdapter<V>(options);
+/** Create a DynamoDB adapter bundle. */
 export const createDynamoDbAdapter = <V>(options: DynamoDbAdapterOptions<V>): DynamoDbAdapter<V> =>
   new DynamoDbAdapter<V>(options);
+/** Create a MongoDB adapter bundle. */
 export const createMongoAdapter = <V>(options: MongoAdapterOptions<V>): MongoAdapter<V> => new MongoAdapter<V>(options);
+/** Create a Postgres adapter bundle. */
 export const createPostgresAdapter = <V>(options: PostgresAdapterOptions<V>): PostgresAdapter<V> =>
   new PostgresAdapter<V>(options);
+/** Create an S3 adapter bundle. */
 export const createS3Adapter = <V>(options: S3AdapterOptions<V>): S3Adapter<V> => new S3Adapter<V>(options);
+/** Create an R2 adapter bundle. */
 export const createR2Adapter = <V>(options: R2AdapterOptions<V>): R2Adapter<V> => new R2Adapter<V>(options);
+/** Create a Cloudflare KV adapter bundle. */
 export const createCloudflareKvAdapter = <V>(options: CloudflareKvAdapterOptions<V>): CloudflareKvAdapter<V> =>
   new CloudflareKvAdapter<V>(options);
+/** Create a Cloudflare D1 adapter bundle. */
 export const createCloudflareD1Adapter = <V>(options: CloudflareD1AdapterOptions<V>): CloudflareD1Adapter<V> =>
   new CloudflareD1Adapter<V>(options);

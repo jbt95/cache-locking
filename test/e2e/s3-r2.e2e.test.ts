@@ -1,5 +1,4 @@
 import { afterAll, beforeAll, it } from 'vitest';
-import { createAdapter, createCacheLocking, type ResponseLike } from '@/index';
 import { startMinio, type MinioTestContext } from '../support/minio';
 import { describeContainerIntegration, makeTestPrefix } from '../integration/integration-helpers';
 import { runFullPathE2E } from './e2e-helpers';
@@ -20,37 +19,27 @@ describeContainerIntegration('s3 and r2 adapters e2e', () => {
     }
   });
 
-  it(
-    'runs the full path with s3 adapter',
-    async () => {
-      const adapter = createAdapter<ResponseLike>({
-        type: 's3',
-        options: {
-          cache: { client: minio.client, bucket: minio.bucket, keyPrefix: `${s3Prefix}cache:` },
-          leases: { client: minio.client, bucket: minio.bucket, keyPrefix: `${s3Prefix}lease:` },
-        },
-      });
+  it('runs the full path with s3 adapter', async () => {
+    const adapter = {
+      type: 's3',
+      options: {
+        cache: { client: minio.client, bucket: minio.bucket, keyPrefix: `${s3Prefix}cache:` },
+        leases: { client: minio.client, bucket: minio.bucket, keyPrefix: `${s3Prefix}lease:` },
+      },
+    } as const;
 
-      const locking = await createCacheLocking<ResponseLike>({ adapter });
-      await runFullPathE2E({ locking });
-    },
-    10000,
-  );
+    await runFullPathE2E({ adapter });
+  }, 10000);
 
-  it(
-    'runs the full path with r2 adapter',
-    async () => {
-      const adapter = createAdapter<ResponseLike>({
-        type: 'r2',
-        options: {
-          cache: { client: minio.client, bucket: minio.bucket, keyPrefix: `${r2Prefix}cache:` },
-          leases: { client: minio.client, bucket: minio.bucket, keyPrefix: `${r2Prefix}lease:` },
-        },
-      });
+  it('runs the full path with r2 adapter', async () => {
+    const adapter = {
+      type: 'r2',
+      options: {
+        cache: { client: minio.client, bucket: minio.bucket, keyPrefix: `${r2Prefix}cache:` },
+        leases: { client: minio.client, bucket: minio.bucket, keyPrefix: `${r2Prefix}lease:` },
+      },
+    } as const;
 
-      const locking = await createCacheLocking<ResponseLike>({ adapter });
-      await runFullPathE2E({ locking });
-    },
-    10000,
-  );
+    await runFullPathE2E({ adapter });
+  }, 10000);
 });

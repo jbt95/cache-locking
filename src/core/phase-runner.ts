@@ -1,11 +1,12 @@
 import { Effect } from 'effect';
-import type { CacheLockingError } from '@core/errors';
+import type { AdapterError, CacheLockingError } from '@core/errors';
 import {
   AbortedError,
   CacheGetFailed,
   CacheSetFailed,
   FetcherFailed,
   HookFailed,
+  isAdapterError,
   isCacheLockingError,
   LeaseAcquireFailed,
   LeaseReadyFailed,
@@ -118,6 +119,7 @@ const cloneCacheLockingError = (error: CacheLockingError): CacheLockingError => 
   }
 };
 
+/** Wraps Effect operations with phase-specific error mapping and tracing. */
 export class PhaseRunner {
   private buildContext(phase: Phase, context: PhaseContext): CacheLockingErrorContext {
     const config = phaseConfig[phase];
@@ -140,11 +142,11 @@ export class PhaseRunner {
     return config.toError(message, context, cause);
   }
 
-  private runEffect<T>(
+  private annotateEffect<T, E, R>(
     phase: Phase,
     context: CacheLockingErrorContext,
-    effect: Effect.Effect<T, CacheLockingError>,
-  ): Effect.Effect<T, CacheLockingError> {
+    effect: Effect.Effect<T, CacheLockingError | E, R>,
+  ): Effect.Effect<T, CacheLockingError | E, R> {
     return effect.pipe(
       Effect.annotateLogs({
         phase,
@@ -160,18 +162,38 @@ export class PhaseRunner {
     );
   }
 
-  runPromise<T>(
+  runEffect<T, R>(
     phase: Phase,
     context: PhaseContext,
     message: string,
-    action: () => Promise<T>,
-  ): Effect.Effect<T, CacheLockingError> {
+    effect: Effect.Effect<T, AdapterError, R>,
+  ): Effect.Effect<T, CacheLockingError, R>;
+  runEffect<T, E, R>(
+    phase: Phase,
+    context: PhaseContext,
+    message: string,
+    effect: Effect.Effect<T, CacheLockingError | E, R>,
+  ): Effect.Effect<T, CacheLockingError | E, R>;
+  runEffect<T, E, R>(
+    phase: Phase,
+    context: PhaseContext,
+    message: string,
+    effect: Effect.Effect<T, AdapterError | CacheLockingError | E, R>,
+  ): Effect.Effect<T, CacheLockingError | E, R> {
     const fullContext = this.buildContext(phase, context);
-    const effect = Effect.tryPromise({
-      try: () => action(),
-      catch: (cause) => this.mapError(phase, fullContext, message, cause),
-    });
-    return this.runEffect(phase, fullContext, effect);
+    const mapped = effect.pipe(
+      Effect.mapError((cause) => {
+        if (isCacheLockingError(cause)) {
+          return cloneCacheLockingError(cause);
+        }
+        if (isAdapterError(cause)) {
+          const config = phaseConfig[phase];
+          return config.toError(message, fullContext, cause);
+        }
+        return cause as E;
+      }),
+    );
+    return this.annotateEffect(phase, fullContext, mapped);
   }
 
   runSync<T>(
@@ -185,6 +207,6 @@ export class PhaseRunner {
       try: () => action(),
       catch: (cause) => this.mapError(phase, fullContext, message, cause),
     });
-    return this.runEffect(phase, fullContext, effect);
+    return this.annotateEffect(phase, fullContext, effect);
   }
 }

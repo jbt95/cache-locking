@@ -1,5 +1,4 @@
 import { afterAll, beforeAll, it } from 'vitest';
-import { createAdapter, createCacheLocking, type ResponseLike } from '@/index';
 import { createUniqueName } from '../support/ids';
 import { startMongo, type MongoTestContext } from '../support/mongodb';
 import { describeContainerIntegration, makeTestPrefix } from '../integration/integration-helpers';
@@ -20,24 +19,19 @@ describeContainerIntegration('mongodb adapter e2e', () => {
     }
   });
 
-  it(
-    'runs the full path',
-    async () => {
-      const db = mongo.client.db(createUniqueName('cache_locking_e2e', '_'));
-      const cacheCollection = db.collection(`${prefix}cache`);
-      const leasesCollection = db.collection(`${prefix}leases`);
+  it('runs the full path', async () => {
+    const db = mongo.client.db(createUniqueName('cache_locking_e2e', '_'));
+    const cacheCollection = db.collection(`${prefix}cache`);
+    const leasesCollection = db.collection(`${prefix}leases`);
 
-      const adapter = createAdapter<ResponseLike>({
-        type: 'mongodb',
-        options: {
-          cache: { collection: cacheCollection, keyPrefix: `${prefix}cache:` },
-          leases: { collection: leasesCollection, keyPrefix: `${prefix}lease:` },
-        },
-      });
+    const adapter = {
+      type: 'mongodb',
+      options: {
+        cache: { collection: cacheCollection, keyPrefix: `${prefix}cache:` },
+        leases: { collection: leasesCollection, keyPrefix: `${prefix}lease:` },
+      },
+    } as const;
 
-      const locking = await createCacheLocking<ResponseLike>({ adapter });
-      await runFullPathE2E({ locking });
-    },
-    10000,
-  );
+    await runFullPathE2E({ adapter });
+  }, 10000);
 });

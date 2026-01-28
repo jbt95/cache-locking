@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, it } from 'vitest';
-import { MemoryLeases, createAdapter, createCacheLocking, type ResponseLike } from '@/index';
+import { MemoryLeases } from '@adapters/memory';
 import { startMemcached, type MemcachedTestContext } from '../support/memcached';
 import { describeContainerIntegration, makeTestPrefix } from '../integration/integration-helpers';
 import { runFullPathE2E } from './e2e-helpers';
@@ -18,21 +18,12 @@ describeContainerIntegration('memcached adapter e2e', () => {
     }
   });
 
-  it(
-    'runs the full path with memory leases',
-    async () => {
-      const adapter = createAdapter<ResponseLike>({
-        type: 'memcached',
-        options: { client: memcached.client, keyPrefix: `${prefix}cache:` },
-      });
+  it('runs the full path with memory leases', async () => {
+    const adapter = {
+      type: 'memcached',
+      options: { client: memcached.client, keyPrefix: `${prefix}cache:` },
+    } as const;
 
-      const locking = await createCacheLocking<ResponseLike>({
-        adapter,
-        leases: new MemoryLeases(),
-      });
-
-      await runFullPathE2E({ locking });
-    },
-    10000,
-  );
+    await runFullPathE2E({ adapter, leases: new MemoryLeases() });
+  }, 10000);
 });

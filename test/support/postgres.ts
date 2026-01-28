@@ -60,9 +60,7 @@ export const createPostgresTables = async (
   const cacheTable = options?.cacheTable ?? createUniqueName('cache', '_');
   const leasesTable = options?.leasesTable ?? createUniqueName('leases', '_');
 
-  await pool.query(
-    `CREATE TABLE ${cacheTable} (key TEXT PRIMARY KEY, value TEXT NOT NULL, expires_at TIMESTAMPTZ)`,
-  );
+  await pool.query(`CREATE TABLE ${cacheTable} (key TEXT PRIMARY KEY, value TEXT NOT NULL, expires_at TIMESTAMPTZ)`);
   await pool.query(
     `CREATE TABLE ${leasesTable} (key TEXT PRIMARY KEY, owner TEXT NOT NULL, expires_at TIMESTAMPTZ NOT NULL, ready BOOLEAN NOT NULL DEFAULT false)`,
   );

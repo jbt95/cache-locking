@@ -1,7 +1,10 @@
-import { Duration } from 'effect';
+import { Duration, Effect } from 'effect';
+import { AdapterError } from '@core/errors';
 import type { D1Database, KVNamespace } from '@cloudflare/workers-types';
 import type { Cache, CoreClock, LeaseAcquireResult, LeaseReadyState, Leases } from '@core/types';
+import { quoteIdentifier, readEpochMillis, toMillisClamped } from '@adapters/utils';
 
+/** Options for Cloudflare KV cache adapter. */
 export type CloudflareKvCacheOptions<V> = {
   kv: KVNamespace;
   keyPrefix?: string;
@@ -9,6 +12,7 @@ export type CloudflareKvCacheOptions<V> = {
   deserialize?: (value: string) => V;
 };
 
+/** Options for Cloudflare D1 cache adapter. */
 export type CloudflareD1CacheOptions<V> = {
   db: D1Database;
   tableName?: string;
@@ -21,6 +25,7 @@ export type CloudflareD1CacheOptions<V> = {
   deserialize?: (value: string) => V;
 };
 
+/** Options for Cloudflare D1 leases adapter. */
 export type CloudflareD1LeasesOptions = {
   db: D1Database;
   tableName?: string;
@@ -32,26 +37,7 @@ export type CloudflareD1LeasesOptions = {
   clock?: CoreClock;
 };
 
-const readEpochMillis = (value: unknown): number | null => {
-  if (value instanceof Date) {
-    return value.getTime();
-  }
-  if (typeof value === 'number') {
-    return Number.isFinite(value) ? value : null;
-  }
-  if (typeof value === 'string') {
-    const asNumber = Number(value);
-    if (Number.isFinite(asNumber)) {
-      return asNumber;
-    }
-    const parsed = Date.parse(value);
-    return Number.isNaN(parsed) ? null : parsed;
-  }
-  return null;
-};
-
-const quoteIdentifier = (value: string): string => `"${value.replace(/"/g, '""')}"`;
-
+/** Cloudflare KV cache adapter. */
 export class CloudflareKvCache<V> implements Cache<V> {
   private readonly kv: KVNamespace;
   private readonly keyPrefix: string;
@@ -69,26 +55,37 @@ export class CloudflareKvCache<V> implements Cache<V> {
     return `${this.keyPrefix}${key}`;
   }
 
-  async get(key: string): Promise<V | null> {
-    const value = await this.kv.get(this.cacheKey(key));
-    if (value === null) {
-      return null;
-    }
-    return this.deserialize(value);
+  get(key: string): Effect.Effect<V | null, AdapterError> {
+    return Effect.tryPromise({
+      try: async () => {
+        const value = await this.kv.get(this.cacheKey(key));
+        if (value === null) {
+          return null;
+        }
+        return this.deserialize(value);
+      },
+      catch: (cause) => new AdapterError('cache.get', key, cause),
+    });
   }
 
-  async set(key: string, value: V, ttl?: Duration.DurationInput): Promise<void> {
-    const serialized = this.serialize(value);
-    if (ttl === undefined) {
-      await this.kv.put(this.cacheKey(key), serialized);
-      return;
-    }
-    const ttlMs = Math.max(0, Duration.toMillis(ttl));
-    const ttlSeconds = Math.max(60, Math.ceil(ttlMs / 1000));
-    await this.kv.put(this.cacheKey(key), serialized, { expirationTtl: ttlSeconds });
+  set(key: string, value: V, ttl?: Duration.DurationInput): Effect.Effect<void, AdapterError> {
+    return Effect.tryPromise({
+      try: async () => {
+        const serialized = this.serialize(value);
+        if (ttl === undefined) {
+          await this.kv.put(this.cacheKey(key), serialized);
+          return;
+        }
+        const ttlMs = toMillisClamped(ttl);
+        const ttlSeconds = Math.max(60, Math.ceil(ttlMs / 1000));
+        await this.kv.put(this.cacheKey(key), serialized, { expirationTtl: ttlSeconds });
+      },
+      catch: (cause) => new AdapterError('cache.set', key, cause),
+    });
   }
 }
 
+/** Cloudflare D1 cache adapter. */
 export class CloudflareD1Cache<V> implements Cache<V> {
   private readonly db: D1Database;
   private readonly tableName: string;
@@ -116,53 +113,60 @@ export class CloudflareD1Cache<V> implements Cache<V> {
     return `${this.keyPrefix}${key}`;
   }
 
-  async get(key: string): Promise<V | null> {
-    const cacheKey = this.cacheKey(key);
-    const row = await this.db
-      .prepare(
-        `SELECT ${this.valueColumn} AS value, ${this.expiresAtColumn} AS expires_at FROM ${this.tableName} WHERE ${this.keyColumn} = ?`,
-      )
-      .bind(cacheKey)
-      .first<{ value: string; expires_at?: number | string | null }>();
+  get(key: string): Effect.Effect<V | null, AdapterError> {
+    return Effect.tryPromise({
+      try: async () => {
+        const cacheKey = this.cacheKey(key);
+        const row = await this.db
+          .prepare(
+            `SELECT ${this.valueColumn} AS value, ${this.expiresAtColumn} AS expires_at FROM ${this.tableName} WHERE ${this.keyColumn} = ?`,
+          )
+          .bind(cacheKey)
+          .first<{ value: string; expires_at?: number | string | null }>();
 
-    if (!row) {
-      return null;
-    }
+        if (!row) {
+          return null;
+        }
 
-    const expiresAt = readEpochMillis(row.expires_at);
-    if (expiresAt !== null && expiresAt <= this.clock.now()) {
-      await this.db
-        .prepare(`DELETE FROM ${this.tableName} WHERE ${this.keyColumn} = ?`)
-        .bind(cacheKey)
-        .run();
-      return null;
-    }
+        const expiresAt = readEpochMillis(row.expires_at);
+        if (expiresAt !== null && expiresAt <= this.clock.now()) {
+          await this.db.prepare(`DELETE FROM ${this.tableName} WHERE ${this.keyColumn} = ?`).bind(cacheKey).run();
+          return null;
+        }
 
-    if (typeof row.value !== 'string') {
-      return null;
-    }
-    return this.deserialize(row.value);
+        if (typeof row.value !== 'string') {
+          return null;
+        }
+        return this.deserialize(row.value);
+      },
+      catch: (cause) => new AdapterError('cache.get', key, cause),
+    });
   }
 
-  async set(key: string, value: V, ttl?: Duration.DurationInput): Promise<void> {
-    const cacheKey = this.cacheKey(key);
-    const serialized = this.serialize(value);
-    const expiresAt =
-      ttl === undefined ? null : this.clock.now() + Math.max(0, Duration.toMillis(ttl));
+  set(key: string, value: V, ttl?: Duration.DurationInput): Effect.Effect<void, AdapterError> {
+    return Effect.tryPromise({
+      try: async () => {
+        const cacheKey = this.cacheKey(key);
+        const serialized = this.serialize(value);
+        const expiresAt = ttl === undefined ? null : this.clock.now() + toMillisClamped(ttl);
 
-    await this.db
-      .prepare(
-        `INSERT INTO ${this.tableName} (${this.keyColumn}, ${this.valueColumn}, ${this.expiresAtColumn})
-         VALUES (?, ?, ?)
-         ON CONFLICT (${this.keyColumn}) DO UPDATE SET
-           ${this.valueColumn} = excluded.${this.valueColumn},
-           ${this.expiresAtColumn} = excluded.${this.expiresAtColumn}`,
-      )
-      .bind(cacheKey, serialized, expiresAt)
-      .run();
+        await this.db
+          .prepare(
+            `INSERT INTO ${this.tableName} (${this.keyColumn}, ${this.valueColumn}, ${this.expiresAtColumn})
+             VALUES (?, ?, ?)
+             ON CONFLICT (${this.keyColumn}) DO UPDATE SET
+               ${this.valueColumn} = excluded.${this.valueColumn},
+               ${this.expiresAtColumn} = excluded.${this.expiresAtColumn}`,
+          )
+          .bind(cacheKey, serialized, expiresAt)
+          .run();
+      },
+      catch: (cause) => new AdapterError('cache.set', key, cause),
+    });
   }
 }
 
+/** Cloudflare D1 leases adapter. */
 export class CloudflareD1Leases implements Leases {
   private readonly db: D1Database;
   private readonly tableName: string;
@@ -188,82 +192,100 @@ export class CloudflareD1Leases implements Leases {
     return `${this.keyPrefix}${key}`;
   }
 
-  async acquire(key: string, owner: string, ttl: Duration.DurationInput): Promise<LeaseAcquireResult> {
-    const now = this.clock.now();
-    const ttlMs = Duration.toMillis(ttl);
-    const leaseUntil = now + Math.max(0, ttlMs);
-    const leaseKey = this.leaseKey(key);
+  acquire(key: string, owner: string, ttl: Duration.DurationInput): Effect.Effect<LeaseAcquireResult, AdapterError> {
+    return Effect.tryPromise({
+      try: async () => {
+        const now = this.clock.now();
+        const ttlMs = toMillisClamped(ttl);
+        const leaseUntil = now + ttlMs;
+        const leaseKey = this.leaseKey(key);
 
-    const result = await this.db
-      .prepare(
-        `INSERT INTO ${this.tableName} (${this.keyColumn}, ${this.ownerColumn}, ${this.expiresAtColumn}, ${this.readyColumn})
-         VALUES (?, ?, ?, 0)
-         ON CONFLICT (${this.keyColumn}) DO UPDATE SET
-           ${this.ownerColumn} = excluded.${this.ownerColumn},
-           ${this.expiresAtColumn} = excluded.${this.expiresAtColumn},
-           ${this.readyColumn} = 0
-         WHERE ${this.tableName}.${this.expiresAtColumn} <= ?`,
-      )
-      .bind(leaseKey, owner, leaseUntil, now)
-      .run();
+        const result = await this.db
+          .prepare(
+            `INSERT INTO ${this.tableName} (${this.keyColumn}, ${this.ownerColumn}, ${this.expiresAtColumn}, ${this.readyColumn})
+             VALUES (?, ?, ?, 0)
+             ON CONFLICT (${this.keyColumn}) DO UPDATE SET
+               ${this.ownerColumn} = excluded.${this.ownerColumn},
+               ${this.expiresAtColumn} = excluded.${this.expiresAtColumn},
+               ${this.readyColumn} = 0
+             WHERE ${this.tableName}.${this.expiresAtColumn} <= ?`,
+          )
+          .bind(leaseKey, owner, leaseUntil, now)
+          .run();
 
-    const changes = result.meta.changes ?? 0;
-    if (changes > 0) {
-      return { role: 'leader', leaseUntil };
-    }
+        const changes = result.meta.changes ?? 0;
+        if (changes > 0) {
+          return { role: 'leader', leaseUntil };
+        }
 
-    const row = await this.db
-      .prepare(`SELECT ${this.expiresAtColumn} AS expires_at FROM ${this.tableName} WHERE ${this.keyColumn} = ?`)
-      .bind(leaseKey)
-      .first<{ expires_at?: number | string | null }>();
-    const expiresAt = row ? readEpochMillis(row.expires_at) : null;
-    return { role: 'follower', leaseUntil: expiresAt ?? now };
+        const row = await this.db
+          .prepare(`SELECT ${this.expiresAtColumn} AS expires_at FROM ${this.tableName} WHERE ${this.keyColumn} = ?`)
+          .bind(leaseKey)
+          .first<{ expires_at?: number | string | null }>();
+        const expiresAt = row ? readEpochMillis(row.expires_at) : null;
+        return { role: 'follower', leaseUntil: expiresAt ?? now };
+      },
+      catch: (cause) => new AdapterError('leases.acquire', key, cause),
+    });
   }
 
-  async release(key: string, owner: string): Promise<void> {
-    await this.db
-      .prepare(
-        `DELETE FROM ${this.tableName} WHERE ${this.keyColumn} = ? AND ${this.ownerColumn} = ?`,
-      )
-      .bind(this.leaseKey(key), owner)
-      .run();
+  release(key: string, owner: string): Effect.Effect<void, AdapterError> {
+    return Effect.tryPromise({
+      try: async () => {
+        await this.db
+          .prepare(`DELETE FROM ${this.tableName} WHERE ${this.keyColumn} = ? AND ${this.ownerColumn} = ?`)
+          .bind(this.leaseKey(key), owner)
+          .run();
+      },
+      catch: (cause) => new AdapterError('leases.release', key, cause),
+    });
   }
 
-  async markReady(key: string): Promise<void> {
-    await this.db
-      .prepare(`UPDATE ${this.tableName} SET ${this.readyColumn} = 1 WHERE ${this.keyColumn} = ?`)
-      .bind(this.leaseKey(key))
-      .run();
+  markReady(key: string): Effect.Effect<void, AdapterError> {
+    return Effect.tryPromise({
+      try: async () => {
+        await this.db
+          .prepare(`UPDATE ${this.tableName} SET ${this.readyColumn} = 1 WHERE ${this.keyColumn} = ?`)
+          .bind(this.leaseKey(key))
+          .run();
+      },
+      catch: (cause) => new AdapterError('leases.markReady', key, cause),
+    });
   }
 
-  async isReady(key: string): Promise<LeaseReadyState> {
-    const leaseKey = this.leaseKey(key);
-    const row = await this.db
-      .prepare(
-        `SELECT ${this.readyColumn} AS ready, ${this.expiresAtColumn} AS expires_at FROM ${this.tableName} WHERE ${this.keyColumn} = ?`,
-      )
-      .bind(leaseKey)
-      .first<{ ready?: number | boolean; expires_at?: number | string | null }>();
+  isReady(key: string): Effect.Effect<LeaseReadyState, AdapterError> {
+    return Effect.tryPromise({
+      try: async () => {
+        const leaseKey = this.leaseKey(key);
+        const row = await this.db
+          .prepare(
+            `SELECT ${this.readyColumn} AS ready, ${this.expiresAtColumn} AS expires_at FROM ${this.tableName} WHERE ${this.keyColumn} = ?`,
+          )
+          .bind(leaseKey)
+          .first<{ ready?: number | boolean; expires_at?: number | string | null }>();
 
-    if (!row) {
-      return { ready: false, expired: true };
-    }
+        if (!row) {
+          return { ready: false, expired: true };
+        }
 
-    const expiresAt = readEpochMillis(row.expires_at);
-    if (expiresAt !== null && expiresAt <= this.clock.now()) {
-      await this.db
-        .prepare(`DELETE FROM ${this.tableName} WHERE ${this.keyColumn} = ?`)
-        .bind(leaseKey)
-        .run();
-      return { ready: false, expired: true };
-    }
+        const expiresAt = readEpochMillis(row.expires_at);
+        if (expiresAt !== null && expiresAt <= this.clock.now()) {
+          await this.db.prepare(`DELETE FROM ${this.tableName} WHERE ${this.keyColumn} = ?`).bind(leaseKey).run();
+          return { ready: false, expired: true };
+        }
 
-    return { ready: Boolean(row.ready), expired: false };
+        return { ready: Boolean(row.ready), expired: false };
+      },
+      catch: (cause) => new AdapterError('leases.isReady', key, cause),
+    });
   }
 }
 
+/** Create a Cloudflare KV cache adapter instance. */
 export const createCloudflareKvCache = <V>(options: CloudflareKvCacheOptions<V>): Cache<V> =>
   new CloudflareKvCache(options);
+/** Create a Cloudflare D1 cache adapter instance. */
 export const createCloudflareD1Cache = <V>(options: CloudflareD1CacheOptions<V>): Cache<V> =>
   new CloudflareD1Cache(options);
+/** Create a Cloudflare D1 leases adapter instance. */
 export const createCloudflareD1Leases = (options: CloudflareD1LeasesOptions): Leases => new CloudflareD1Leases(options);

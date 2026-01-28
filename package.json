@@ -29,6 +29,7 @@
     "test:e2e": "INTEGRATION_TESTS=1 vitest run --config vitest-e2e.config.ts",
     "test:integration": "INTEGRATION_TESTS=1 vitest run --config vitest-config.ts",
     "test:watch": "vitest --config vitest-config.ts",
+    "lint": "prettier --check .",
     "format": "prettier --write .",
     "format:check": "prettier --check ."
   },

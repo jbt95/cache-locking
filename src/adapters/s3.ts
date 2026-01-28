@@ -1,5 +1,7 @@
-import { Duration } from 'effect';
+import { Duration, Effect } from 'effect';
+import { AdapterError } from '@core/errors';
 import type { Cache, CoreClock, LeaseAcquireResult, LeaseReadyState, Leases } from '@core/types';
+import { readEpochMillis, toMillisClamped } from '@adapters/utils';
 import {
   DeleteObjectCommand,
   GetObjectCommand,
@@ -9,6 +11,7 @@ import {
 } from '@aws-sdk/client-s3';
 import { Readable } from 'node:stream';
 
+/** Options for S3 cache adapter. */
 export type S3CacheOptions<V> = {
   client: S3Client;
   bucket: string;
@@ -20,6 +23,7 @@ export type S3CacheOptions<V> = {
   contentType?: string;
 };
 
+/** Options for S3 leases adapter. */
 export type S3LeasesOptions = {
   client: S3Client;
   bucket: string;
@@ -43,21 +47,6 @@ const isPreconditionFailed = (error: unknown): boolean => {
   const status = (error as { $metadata?: { httpStatusCode?: number } }).$metadata?.httpStatusCode;
   const name = (error as { name?: string }).name;
   return status === 412 || name === 'PreconditionFailed' || name === 'ConditionalCheckFailed';
-};
-
-const readEpochMillis = (value: unknown): number | null => {
-  if (typeof value === 'number') {
-    return Number.isFinite(value) ? value : null;
-  }
-  if (typeof value === 'string') {
-    const asNumber = Number(value);
-    if (Number.isFinite(asNumber)) {
-      return asNumber;
-    }
-    const parsed = Date.parse(value);
-    return Number.isNaN(parsed) ? null : parsed;
-  }
-  return null;
 };
 
 const readBody = async (body: unknown): Promise<string | null> => {
@@ -116,6 +105,7 @@ const readBody = async (body: unknown): Promise<string | null> => {
   return null;
 };
 
+/** S3 cache adapter. */
 export class S3Cache<V> implements Cache<V> {
   private readonly client: S3Client;
   private readonly bucket: string;
@@ -141,58 +131,69 @@ export class S3Cache<V> implements Cache<V> {
     return `${this.keyPrefix}${key}`;
   }
 
-  async get(key: string): Promise<V | null> {
-    const cacheKey = this.cacheKey(key);
-    try {
-      const response = await this.client.send(
-        new GetObjectCommand({
-          Bucket: this.bucket,
-          Key: cacheKey,
-        }),
-      );
+  get(key: string): Effect.Effect<V | null, AdapterError> {
+    return Effect.tryPromise({
+      try: async () => {
+        const cacheKey = this.cacheKey(key);
+        try {
+          const response = await this.client.send(
+            new GetObjectCommand({
+              Bucket: this.bucket,
+              Key: cacheKey,
+            }),
+          );
 
-      const expiresAt = readEpochMillis(response.Metadata?.[this.expiresAtMetadataKey]);
-      if (expiresAt !== null && expiresAt <= this.clock.now()) {
-        await this.client.send(new DeleteObjectCommand({ Bucket: this.bucket, Key: cacheKey }));
-        return null;
-      }
+          const expiresAt = readEpochMillis(response.Metadata?.[this.expiresAtMetadataKey]);
+          if (expiresAt !== null && expiresAt <= this.clock.now()) {
+            await this.client.send(new DeleteObjectCommand({ Bucket: this.bucket, Key: cacheKey }));
+            return null;
+          }
 
-      const body = await readBody(response.Body);
-      if (body === null) {
-        return null;
-      }
-      return this.deserialize(body);
-    } catch (error) {
-      if (isNotFoundError(error)) {
-        return null;
-      }
-      throw error;
-    }
+          const body = await readBody(response.Body);
+          if (body === null) {
+            return null;
+          }
+          return this.deserialize(body);
+        } catch (error) {
+          if (isNotFoundError(error)) {
+            return null;
+          }
+          throw error;
+        }
+      },
+      catch: (cause) => new AdapterError('cache.get', key, cause),
+    });
   }
 
-  async set(key: string, value: V, ttl?: Duration.DurationInput): Promise<void> {
-    const cacheKey = this.cacheKey(key);
-    const serialized = this.serialize(value);
+  set(key: string, value: V, ttl?: Duration.DurationInput): Effect.Effect<void, AdapterError> {
+    return Effect.tryPromise({
+      try: async () => {
+        const cacheKey = this.cacheKey(key);
+        const serialized = this.serialize(value);
 
-    const metadata: Record<string, string> = {};
-    if (ttl !== undefined) {
-      const ttlMs = Duration.toMillis(ttl);
-      const expiresAt = this.clock.now() + Math.max(0, ttlMs);
-      metadata[this.expiresAtMetadataKey] = String(expiresAt);
-    }
+        const metadata: Record<string, string> = {};
+        if (ttl !== undefined) {
+          const ttlMs = toMillisClamped(ttl);
+          const expiresAt = this.clock.now() + ttlMs;
+          metadata[this.expiresAtMetadataKey] = String(expiresAt);
+        }
 
-    await this.client.send(
-      new PutObjectCommand({
-        Bucket: this.bucket,
-        Key: cacheKey,
-        Body: serialized,
-        ContentType: this.contentType ?? 'application/json',
-        Metadata: Object.keys(metadata).length > 0 ? metadata : undefined,
-      }),
-    );
+        await this.client.send(
+          new PutObjectCommand({
+            Bucket: this.bucket,
+            Key: cacheKey,
+            Body: serialized,
+            ContentType: this.contentType ?? 'application/json',
+            Metadata: Object.keys(metadata).length > 0 ? metadata : undefined,
+          }),
+        );
+      },
+      catch: (cause) => new AdapterError('cache.set', key, cause),
+    });
   }
 }
 
+/** S3 leases adapter. */
 export class S3Leases implements Leases {
   private readonly client: S3Client;
   private readonly bucket: string;
@@ -257,94 +258,116 @@ export class S3Leases implements Leases {
     );
   }
 
-  async acquire(key: string, owner: string, ttl: Duration.DurationInput): Promise<LeaseAcquireResult> {
-    const now = this.clock.now();
-    const ttlMs = Duration.toMillis(ttl);
-    const leaseUntil = now + Math.max(0, ttlMs);
-    const leaseKey = this.leaseKey(key);
+  acquire(key: string, owner: string, ttl: Duration.DurationInput): Effect.Effect<LeaseAcquireResult, AdapterError> {
+    return Effect.tryPromise({
+      try: async () => {
+        const now = this.clock.now();
+        const ttlMs = toMillisClamped(ttl);
+        const leaseUntil = now + ttlMs;
+        const leaseKey = this.leaseKey(key);
 
-    try {
-      await this.putLeaseObject(leaseKey, owner, leaseUntil, { ifNoneMatch: true });
-      return { role: 'leader', leaseUntil };
-    } catch (error) {
-      if (!isPreconditionFailed(error)) {
-        throw error;
-      }
-    }
-
-    const existing = await this.headObject(leaseKey);
-    if (!existing) {
-      return { role: 'follower', leaseUntil: now };
-    }
-
-    const currentExpiresAt = readEpochMillis(existing.Metadata?.[this.expiresAtMetadataKey]);
-    const expired = currentExpiresAt !== null && currentExpiresAt <= now;
-
-    if (expired && existing.ETag) {
-      try {
-        await this.putLeaseObject(leaseKey, owner, leaseUntil, { ifMatch: existing.ETag });
-        return { role: 'leader', leaseUntil };
-      } catch (error) {
-        if (!isPreconditionFailed(error)) {
-          throw error;
+        try {
+          await this.putLeaseObject(leaseKey, owner, leaseUntil, { ifNoneMatch: true });
+          return { role: 'leader', leaseUntil };
+        } catch (error) {
+          if (!isPreconditionFailed(error)) {
+            throw error;
+          }
         }
-      }
-    }
 
-    return { role: 'follower', leaseUntil: currentExpiresAt ?? now };
+        const existing = await this.headObject(leaseKey);
+        if (!existing) {
+          return { role: 'follower', leaseUntil: now };
+        }
+
+        const currentExpiresAt = readEpochMillis(existing.Metadata?.[this.expiresAtMetadataKey]);
+        const expired = currentExpiresAt !== null && currentExpiresAt <= now;
+
+        if (expired && existing.ETag) {
+          try {
+            await this.putLeaseObject(leaseKey, owner, leaseUntil, { ifMatch: existing.ETag });
+            return { role: 'leader', leaseUntil };
+          } catch (error) {
+            if (!isPreconditionFailed(error)) {
+              throw error;
+            }
+          }
+        }
+
+        return { role: 'follower', leaseUntil: currentExpiresAt ?? now };
+      },
+      catch: (cause) => new AdapterError('leases.acquire', key, cause),
+    });
   }
 
-  async release(key: string, owner: string): Promise<void> {
-    const leaseKey = this.leaseKey(key);
-    const existing = await this.headObject(leaseKey);
-    if (!existing) {
-      return;
-    }
-    if (existing.Metadata?.[this.ownerMetadataKey] !== owner) {
-      return;
-    }
-    await this.client.send(new DeleteObjectCommand({ Bucket: this.bucket, Key: leaseKey }));
+  release(key: string, owner: string): Effect.Effect<void, AdapterError> {
+    return Effect.tryPromise({
+      try: async () => {
+        const leaseKey = this.leaseKey(key);
+        const existing = await this.headObject(leaseKey);
+        if (!existing) {
+          return;
+        }
+        if (existing.Metadata?.[this.ownerMetadataKey] !== owner) {
+          return;
+        }
+        await this.client.send(new DeleteObjectCommand({ Bucket: this.bucket, Key: leaseKey }));
+      },
+      catch: (cause) => new AdapterError('leases.release', key, cause),
+    });
   }
 
-  async markReady(key: string): Promise<void> {
-    const ttlMs = Duration.toMillis(this.readyTtl);
-    const expiresAt = this.clock.now() + Math.max(0, ttlMs);
-    const metadata: Record<string, string> = {
-      [this.expiresAtMetadataKey]: String(expiresAt),
-    };
-    await this.client.send(
-      new PutObjectCommand({
-        Bucket: this.bucket,
-        Key: this.readyKey(key),
-        Body: '1',
-        ContentType: 'text/plain',
-        Metadata: metadata,
-      }),
-    );
+  markReady(key: string): Effect.Effect<void, AdapterError> {
+    return Effect.tryPromise({
+      try: async () => {
+        const ttlMs = toMillisClamped(this.readyTtl);
+        const expiresAt = this.clock.now() + ttlMs;
+        const metadata: Record<string, string> = {
+          [this.expiresAtMetadataKey]: String(expiresAt),
+        };
+        await this.client.send(
+          new PutObjectCommand({
+            Bucket: this.bucket,
+            Key: this.readyKey(key),
+            Body: '1',
+            ContentType: 'text/plain',
+            Metadata: metadata,
+          }),
+        );
+      },
+      catch: (cause) => new AdapterError('leases.markReady', key, cause),
+    });
   }
 
-  async isReady(key: string): Promise<LeaseReadyState> {
-    const readyKey = this.readyKey(key);
-    const readyHead = await this.headObject(readyKey);
-    if (readyHead) {
-      const readyExpiresAt = readEpochMillis(readyHead.Metadata?.[this.expiresAtMetadataKey]);
-      if (readyExpiresAt === null || readyExpiresAt > this.clock.now()) {
-        return { ready: true, expired: false };
-      }
-      await this.client.send(new DeleteObjectCommand({ Bucket: this.bucket, Key: readyKey }));
-    }
+  isReady(key: string): Effect.Effect<LeaseReadyState, AdapterError> {
+    return Effect.tryPromise({
+      try: async () => {
+        const readyKey = this.readyKey(key);
+        const readyHead = await this.headObject(readyKey);
+        if (readyHead) {
+          const readyExpiresAt = readEpochMillis(readyHead.Metadata?.[this.expiresAtMetadataKey]);
+          if (readyExpiresAt === null || readyExpiresAt > this.clock.now()) {
+            return { ready: true, expired: false };
+          }
+          await this.client.send(new DeleteObjectCommand({ Bucket: this.bucket, Key: readyKey }));
+        }
 
-    const leaseHead = await this.headObject(this.leaseKey(key));
-    if (!leaseHead) {
-      return { ready: false, expired: true };
-    }
-    const leaseExpiresAt = readEpochMillis(leaseHead.Metadata?.[this.expiresAtMetadataKey]);
-    if (leaseExpiresAt !== null && leaseExpiresAt <= this.clock.now()) {
-      return { ready: false, expired: true };
-    }
-    return { ready: false, expired: false };
+        const leaseHead = await this.headObject(this.leaseKey(key));
+        if (!leaseHead) {
+          return { ready: false, expired: true };
+        }
+        const leaseExpiresAt = readEpochMillis(leaseHead.Metadata?.[this.expiresAtMetadataKey]);
+        if (leaseExpiresAt !== null && leaseExpiresAt <= this.clock.now()) {
+          return { ready: false, expired: true };
+        }
+        return { ready: false, expired: false };
+      },
+      catch: (cause) => new AdapterError('leases.isReady', key, cause),
+    });
   }
 }
 
+/** Create an S3 cache adapter instance. */
 export const createS3Cache = <V>(options: S3CacheOptions<V>): Cache<V> => new S3Cache(options);
+/** Create an S3 leases adapter instance. */
 export const createS3Leases = (options: S3LeasesOptions): Leases => new S3Leases(options);
